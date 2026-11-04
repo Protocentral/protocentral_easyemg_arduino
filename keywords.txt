@@ -1,0 +1,80 @@
+#######################################
+# Syntax Coloring Map For ProtoCentral easyEMG
+#######################################
+
+#######################################
+# Class (KEYWORD1)
+#######################################
+
+easyEMG	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+# Initialization
+begin	KEYWORD2
+isConnected	KEYWORD2
+
+# Reading the signal
+readRaw	KEYWORD2
+readRawUncorrected	KEYWORD2
+readVoltage	KEYWORD2
+readMicrovolts	KEYWORD2
+
+# RMS envelope
+setEnvelopeWindow	KEYWORD2
+getEnvelopeWindow	KEYWORD2
+envelopeWindowMillis	KEYWORD2
+resetEnvelope	KEYWORD2
+readEnvelope	KEYWORD2
+readEnvelopeRaw	KEYWORD2
+lastEnvelope	KEYWORD2
+lastRaw	KEYWORD2
+lastMicrovolts	KEYWORD2
+
+# Mains notch
+setNotch	KEYWORD2
+disableNotch	KEYWORD2
+notchEnabled	KEYWORD2
+
+# Baseline
+calibrateBaseline	KEYWORD2
+setBaseline	KEYWORD2
+getBaseline	KEYWORD2
+
+# Activation and MVC
+setActivationThreshold	KEYWORD2
+getActivationThreshold	KEYWORD2
+isActive	KEYWORD2
+setMVC	KEYWORD2
+getMVC	KEYWORD2
+readPercentMVC	KEYWORD2
+
+# Low-level / advanced
+setDataRate	KEYWORD2
+setRange	KEYWORD2
+setMode	KEYWORD2
+setMux	KEYWORD2
+fullScaleVolts	KEYWORD2
+readSingleShot	KEYWORD2
+
+#######################################
+# Enums (KEYWORD1)
+#######################################
+
+DataRate	KEYWORD1
+FSRange	KEYWORD1
+Mux	KEYWORD1
+Mode	KEYWORD1
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
+EASYEMG_I2C_ADDR_DEFAULT	LITERAL1
+EASYEMG_I2C_ADDR_ALT	LITERAL1
+EASYEMG_ADC_LSB_V	LITERAL1
+EASYEMG_GAIN	LITERAL1
+EASYEMG_HPF_HZ	LITERAL1
+EASYEMG_LPF_HZ	LITERAL1

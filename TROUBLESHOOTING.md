@@ -117,7 +117,7 @@ the ADC never free-runs at all.
 
 ## Known-good reference values
 
-From verified Rev 1 hardware (×20.8 gain, TLA2022), for comparison when something looks wrong. Production v2 boards use ×51.7 and a TLA2024, and haven't been characterised yet, so treat count-based values as a guide only:
+From verified Rev 1 hardware (×20.8 gain, TLA2022), for comparison when something looks wrong. Production v2 boards use ×51.7 and a TLA2024, so treat count-based values as a guide only:
 
 | | |
 |---|---|

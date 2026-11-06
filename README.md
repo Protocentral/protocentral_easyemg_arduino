@@ -9,6 +9,12 @@ Arduino library for the **ProtoCentral easyEMG Breakout**: single-channel surfac
 
 ![ProtoCentral easyEMG](assets/easyemg.jpg)
 
+## See it in OpenView
+
+![OpenView showing the easyEMG raw sEMG waveform and its RMS envelope rising during a forearm flex and returning to baseline at rest](assets/easyemg-openview.gif)
+
+Raw sEMG (top) and its RMS envelope (bottom) in [OpenView](https://github.com/Protocentral/protocentral_openview), in µV at the electrodes, during forearm flexes. The `06.OpenView` example streams both; it needs OpenView 3.4 or later and the **easyEMG Breakout** profile.
+
 ## Links
 
 | | |

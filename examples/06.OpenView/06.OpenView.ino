@@ -119,9 +119,9 @@ easyEMG emg;
 // or 128 ms at 1000 SPS; this EMA makes the displayed envelope calmer on a chart.
 #define ENVELOPE_SMOOTH_MS     120.0f
 
-volatile char dataPacket[DATA_LEN];
-const char dataPacketFooter[2] = {ZERO, CES_CMDIF_PKT_STOP};
-const char dataPacketHeader[5] = {CES_CMDIF_PKT_START_1, CES_CMDIF_PKT_START_2,
+volatile uint8_t dataPacket[DATA_LEN];
+const uint8_t dataPacketFooter[2] = {ZERO, CES_CMDIF_PKT_STOP};
+const uint8_t dataPacketHeader[5] = {CES_CMDIF_PKT_START_1, CES_CMDIF_PKT_START_2,
                                   DATA_LEN, ZERO, CES_CMDIF_TYPE_DATA};
 
 // 500 Hz packet rate, matching OpenView's easyEMG profile.

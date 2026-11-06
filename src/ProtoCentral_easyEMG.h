@@ -81,6 +81,21 @@
 #define EASYEMG_CONV_REG           0x00       // conversion result
 #define EASYEMG_CONF_REG           0x01       // configuration
 
+/////////////////////////////////////////////////////////////////////////////////////////
+// Notch sections
+/////////////////////////////////////////////////////////////////////////////////////////
+// Most biquads the notch chain holds. At 1000 SPS and 50 Hz mains, setMainsNotch()
+// wants 9 (50-450 Hz). Nine float biquads per sample is trivial on an ESP32, RP2040 or
+// UNO R4, but an 8-bit AVR has no FPU and cannot run them at 1000 SPS on top of the
+// I2C read, so AVR builds stop at the first three harmonics (50, 100, 150 Hz). Use
+// setMainsNotch()'s maxHarmonics to ask for fewer. Don't redefine this in a sketch:
+// the library's .cpp is compiled on its own and would not see it.
+#if defined(__AVR__)
+#define EASYEMG_MAX_NOTCH_SECTIONS 3
+#else
+#define EASYEMG_MAX_NOTCH_SECTIONS 9
+#endif
+
 class easyEMG
 {
   public:
@@ -188,23 +203,50 @@ class easyEMG
     // 20-310 Hz sEMG band, so removing it always costs real signal. That is the right
     // default for a clean recording.
     //
-    // It is the wrong default when hum is so large that it swamps the muscle - which
-    // is what happens on a mains-powered host, or with dried-out electrodes. Then a
-    // narrow software notch is the pragmatic trade: you lose a slice of the band and
-    // get a usable signal back.
+    // It is the wrong default when hum is so large that it swamps the muscle. A
+    // mains-powered host does that, and so do dried-out electrodes. So does the room:
+    // even on a battery-powered host, LED drivers, fluorescent ballasts and nearby
+    // mains wiring couple into the body and leads, mostly at 100 and 150 Hz rather
+    // than 50. Then a narrow software notch is the pragmatic trade: you lose a slice
+    // of the band and get a usable signal back.
     //
     // You must pass your ACTUAL sample rate, because the filter coefficients depend
     // on it and this board's rate is set by how fast your host polls, not by the ADC.
     // 04.EnvelopeRMS and 07.Diagnostics both measure it for you.
     //
-    // Returns false (and leaves the notch off) if the rate is too low for the
-    // requested frequency - below about 2.5x, a notch cannot be built.
-    //
     // The notch applies to readRaw() and therefore to everything downstream:
     // microvolts, envelope, activation and %MVC. readRawUncorrected() stays raw.
+    //
+    // setNotch() builds ONE notch at mainsHz, about mainsHz/q wide (12.5 Hz at 50 Hz
+    // with the default q = 4). It leaves 100, 150 Hz and the other harmonics alone.
+    // Returns false (and leaves the notch off) if the rate is too low for the
+    // requested frequency - below about 2.5x, a notch cannot be built.
     bool    setNotch(float mainsHz, float sampleRateHz, float q = 4.0f);
+
+    // setMainsNotch() builds a notch on EVERY mains harmonic up to 0.45x the sample
+    // rate: 50, 100 ... 450 Hz at 1000 SPS and 50 Hz mains, or 60 ... 420 Hz at 60 Hz.
+    // Each notch is bandwidthHz wide (-3 dB), the same at every harmonic, so the chain
+    // costs little signal: about 6% of a flat 20-480 Hz sEMG spectrum with the default
+    // 2 Hz at 1000 SPS.
+    //
+    // The trade is depth when the mains frequency drifts, because a drift grows with
+    // the harmonic number. At 50.07 Hz (0.14% high, as measured on one bench) a 2 Hz
+    // chain still takes 23 dB off 50 Hz and 14 dB off 150 Hz, but only 5 dB off
+    // 450 Hz. Widen bandwidthHz for more depth on the upper harmonics, at more cost.
+    //
+    // maxHarmonics limits the chain (0 = as many as the rate allows), and so does
+    // EASYEMG_MAX_NOTCH_SECTIONS (3 on AVR, 9 elsewhere).
+    //
+    // A 2 Hz notch takes about 0.5 s to settle (time constant ~1/(pi x bandwidth)).
+    //
+    // Returns the number of notches built, or 0 (and leaves the notch off) if none can
+    // be: no harmonic below 0.45x the rate, or bandwidthHz outside 0 < bw < mainsHz/2.
+    uint8_t setMainsNotch(float mainsHz, float sampleRateHz, float bandwidthHz = 2.0f,
+                          uint8_t maxHarmonics = 0);
+
     void    disableNotch();
     bool    notchEnabled();
+    uint8_t notchSections();   // notches in the chain: 0 off, 1 after setNotch()
 
     /////////////////////////////////////////////////////////////////////////////////////
     // Digital high-pass (optional, OFF by default)
@@ -305,10 +347,17 @@ class easyEMG
     float    _threshold;
     float    _mvc;
 
-    // Mains notch biquad (direct form II transposed).
-    bool     _notchOn;
-    float    _nb0, _nb1, _nb2, _na1, _na2;
-    float    _nz1, _nz2;
+    // Mains notch chain, one biquad per section (direct form II transposed). A notch
+    // has b2 = b0 and a1 = b1, so each section keeps three coefficients:
+    //   y = b0*x + z1;  z1 = b1*x - b1*y + z2;  z2 = b0*x - a2*y
+    struct NotchSection {
+        float b0, b1, a2;
+        float z1, z2;
+    };
+    void     setNotchSection(uint8_t i, float hz, float sampleRateHz, float alpha);
+
+    NotchSection _notch[EASYEMG_MAX_NOTCH_SECTIONS];
+    uint8_t  _notchCount;
 
     // Digital high-pass biquad (direct form II transposed).
     bool     _hpOn;

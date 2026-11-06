@@ -59,16 +59,24 @@
 //
 // ---- Mains notch ---------------------------------------------------------------
 //
-// USE_NOTCH arms the library's 50/60 Hz notch, and it works here because the sample
-// rate is FIXED and therefore exactly known.
+// USE_NOTCH arms the library's harmonic notch: a 2 Hz wide notch on every multiple
+// of MAINS_HZ up to 450 Hz (50, 100 ... 450 Hz, or 60 ... 420 Hz). The hum on a person
+// is rarely just 50 Hz. Even with the host on battery, LED drivers, fluorescent
+// lights and nearby wiring put most of it at 100 and 150 Hz, which a single 50 Hz
+// notch leaves untouched, and it can grow during a contraction. On one bench recording
+// this took the resting level from about 70 to about 25 uV RMS. The notches together
+// cost about 6% of the sEMG.
 //
-// That matters more than it sounds. A Q=4 notch at 50 Hz is only about 12.5 Hz wide,
-// so its coefficients have to be built from the true sample rate. Get the rate wrong
-// by 10% and the notch lands at 45 Hz, where it attenuates mains by under 4 dB -
-// effectively not working, while still removing signal at the wrong frequency. A
-// free-running loop cannot hold its rate anywhere near tightly enough, and the
-// per-packet serial write makes the intervals non-uniform on top of that. Pacing the
-// ADC on a timer removes both problems.
+// It works here because the sample rate is FIXED and therefore exactly known. A 2 Hz
+// notch at 450 Hz has to land within a fraction of a hertz, so its coefficients have
+// to be built from the true sample rate. A free-running loop cannot hold its rate
+// anywhere near tightly enough, and the per-packet serial write makes the intervals
+// non-uniform on top of that. Pacing the ADC on a timer removes both problems.
+//
+// The mains frequency itself drifts by a fraction of a percent, and the drift grows
+// with the harmonic, so the upper notches are shallower than the lower ones. Widen
+// NOTCH_BW_HZ to trade more signal for more depth. On an 8-bit AVR the library stops
+// at 150 Hz: it cannot run nine filters at 1000 SPS.
 //
 // A notch still costs real in-band signal, so turn it off for anything you intend to
 // quote as a measurement.
@@ -76,7 +84,8 @@
 // SAFETY: power the host from a BATTERY when the subject is a person. A
 // mains-connected host couples the body to earth and the front-end saturates on
 // common-mode hum - the symptom is no visible bursts at all, not merely a noisy
-// trace.
+// trace. A battery host can still pick up hum from the room; that is what the notch
+// is for.
 //
 // Download OpenView: https://github.com/Protocentral/protocentral_openview
 
@@ -104,9 +113,11 @@ easyEMG emg;
 #define MVC_RECORD_MS          5000L
 #define MVC_MIN_UV             100.0f   // about a light contraction
 
-// Mains notch. Set MAINS_HZ to 50 or 60; set USE_NOTCH to false to disable.
+// Mains notch on every harmonic up to 450 Hz. Set MAINS_HZ to 50 or 60; set USE_NOTCH
+// to false to disable. NOTCH_BW_HZ is the width of each notch.
 #define USE_NOTCH              true
 #define MAINS_HZ               50.0f
+#define NOTCH_BW_HZ            2.0f
 
 // Digital high-pass corner; set to 0 to disable.
 #define HIGH_PASS_HZ           20.0f
@@ -230,8 +241,9 @@ void setup()
     emg.setEnvelopeWindow(easyEMG::EASYEMG_MAX_ENVELOPE_WINDOW);
 
 #if USE_NOTCH
-    // The rate is fixed and known exactly, so the coefficients are exact.
-    emg.setNotch(MAINS_HZ, (float)ADC_RATE_HZ);
+    // The rate is fixed and known exactly, so the coefficients are exact. Builds one
+    // notch per harmonic: 9 at 50 Hz mains, 7 at 60 Hz, 3 on AVR.
+    emg.setMainsNotch(MAINS_HZ, (float)ADC_RATE_HZ, NOTCH_BW_HZ);
 #endif
 
     // Leaves the filter off when HIGH_PASS_HZ is 0.

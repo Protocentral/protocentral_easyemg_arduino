@@ -225,24 +225,30 @@ class easyEMG
 
     // setMainsNotch() builds a notch on EVERY mains harmonic up to 0.45x the sample
     // rate: 50, 100 ... 450 Hz at 1000 SPS and 50 Hz mains, or 60 ... 420 Hz at 60 Hz.
-    // Each notch is bandwidthHz wide (-3 dB), the same at every harmonic, so the chain
-    // costs little signal: about 6% of a flat 20-480 Hz sEMG spectrum with the default
-    // 2 Hz at 1000 SPS.
     //
-    // The trade is depth when the mains frequency drifts, because a drift grows with
-    // the harmonic number. At 50.07 Hz (0.14% high, as measured on one bench) a 2 Hz
-    // chain still takes 23 dB off 50 Hz and 14 dB off 150 Hz, but only 5 dB off
-    // 450 Hz. Widen bandwidthHz for more depth on the upper harmonics, at more cost.
+    // The harmonics are each bandwidthHz wide (-3 dB, 2 Hz by default) and the
+    // fundamental is fundamentalBandwidthHz wide (6 Hz by default). The whole chain
+    // costs about 7% of a flat 20-480 Hz sEMG spectrum at 1000 SPS.
+    //
+    // Why the fundamental is wider: a notch takes about 1/(pi x bandwidth) to settle,
+    // and until it does it passes any CHANGE in the hum. 50/60 Hz pickup is usually the
+    // largest and jumps when the subject moves or a load switches, so a 2 Hz notch there
+    // lets each jump through as a 50 Hz burst lasting about 0.4 s. At 6 Hz the burst is
+    // over in about 0.1 s, and a fundamental drifting to 50.05 Hz leaves a third of the
+    // residue. The harmonics are smaller and steadier, so they stay narrow and cheap.
+    //
+    // The trade on the harmonics is depth when the mains frequency drifts, because a
+    // drift grows with the harmonic number. At 50.07 Hz (0.14% high, as measured on one
+    // bench) a 2 Hz notch still takes 14 dB off 150 Hz, but only 5 dB off 450 Hz. Widen
+    // bandwidthHz for more depth on the upper harmonics, at more cost.
     //
     // maxHarmonics limits the chain (0 = as many as the rate allows), and so does
     // EASYEMG_MAX_NOTCH_SECTIONS (3 on AVR, 9 elsewhere).
     //
-    // A 2 Hz notch takes about 0.5 s to settle (time constant ~1/(pi x bandwidth)).
-    //
     // Returns the number of notches built, or 0 (and leaves the notch off) if none can
-    // be: no harmonic below 0.45x the rate, or bandwidthHz outside 0 < bw < mainsHz/2.
+    // be: no harmonic below 0.45x the rate, or a bandwidth outside 0 < bw < mainsHz/2.
     uint8_t setMainsNotch(float mainsHz, float sampleRateHz, float bandwidthHz = 2.0f,
-                          uint8_t maxHarmonics = 0);
+                          float fundamentalBandwidthHz = 6.0f, uint8_t maxHarmonics = 0);
 
     void    disableNotch();
     bool    notchEnabled();

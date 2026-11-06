@@ -210,20 +210,24 @@ bool easyEMG::setNotch(float mainsHz, float sampleRateHz, float q)
     return true;
 }
 
-// One notch per harmonic, each exactly bandwidthHz wide at -3 dB in the digital
+// One notch per harmonic, each exactly its bandwidth wide at -3 dB in the digital
 // domain: alpha = tan(pi * bandwidth / fs). Unlike the RBJ alpha this does not
-// narrow towards Nyquist, so 450 Hz at 1000 SPS gets the same width as 50 Hz.
+// narrow towards Nyquist, so 450 Hz at 1000 SPS gets the same width as 100 Hz.
+// The fundamental gets its own, wider bandwidth; see the header.
 uint8_t easyEMG::setMainsNotch(float mainsHz, float sampleRateHz, float bandwidthHz,
-                               uint8_t maxHarmonics)
+                               float fundamentalBandwidthHz, uint8_t maxHarmonics)
 {
     if (mainsHz <= 0.0f || sampleRateHz <= 0.0f ||
-        bandwidthHz <= 0.0f || bandwidthHz >= (mainsHz * 0.5f)) {
+        bandwidthHz <= 0.0f || bandwidthHz >= (mainsHz * 0.5f) ||
+        fundamentalBandwidthHz <= 0.0f || fundamentalBandwidthHz >= (mainsHz * 0.5f)) {
         disableNotch();
         return 0;
     }
 
-    const float top   = 0.45f * sampleRateHz;
-    const float alpha = tanf(3.14159265358979f * bandwidthHz / sampleRateHz);
+    const float pi        = 3.14159265358979f;
+    const float top       = 0.45f * sampleRateHz;
+    const float alpha     = tanf(pi * bandwidthHz / sampleRateHz);
+    const float alphaFund = tanf(pi * fundamentalBandwidthHz / sampleRateHz);
 
     uint8_t n = 0;
     while (n < EASYEMG_MAX_NOTCH_SECTIONS) {
@@ -234,7 +238,7 @@ uint8_t easyEMG::setMainsNotch(float mainsHz, float sampleRateHz, float bandwidt
         if (hz > top) {
             break;
         }
-        setNotchSection(n, hz, sampleRateHz, alpha);
+        setNotchSection(n, hz, sampleRateHz, (n == 0) ? alphaFund : alpha);
         n++;
     }
 

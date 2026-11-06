@@ -199,9 +199,11 @@ void phase4_alive()
 // Americas, Japan and a few others.
 const float MAINS_HZ = 50.0f;
 
-// Width of each notch. The live table notches every harmonic up to 450 Hz at this
-// width (setMainsNotch), as 06.OpenView does.
-const float NOTCH_BW_HZ = 2.0f;
+// Notch widths for the live table, which notches every harmonic up to 450 Hz
+// (setMainsNotch) exactly as 06.OpenView does: wider at the fundamental, where the hum
+// is largest and changes fastest, narrow on the harmonics.
+const float NOTCH_FUND_BW_HZ = 6.0f;
+const float NOTCH_BW_HZ      = 2.0f;
 
 // Width of the single notch the 'h' breakdown puts on each harmonic in turn. A little
 // wider than NOTCH_BW_HZ, so a drifting mains frequency still lands inside it.
@@ -301,7 +303,8 @@ float measureWithNotch(float hz)
 // notches the library built through *sections, if given.
 float measureWithMainsNotch(uint8_t *sections = NULL)
 {
-    uint8_t n = emg.setMainsNotch(MAINS_HZ, (float)ADC_RATE_HZ, NOTCH_BW_HZ);
+    uint8_t n = emg.setMainsNotch(MAINS_HZ, (float)ADC_RATE_HZ, NOTCH_BW_HZ,
+                                  NOTCH_FUND_BW_HZ);
     if (sections) *sections = n;
     settleNotch();
     float uv = windowAcMicrovolts(NULL, NULL);
@@ -392,17 +395,22 @@ void phase5_signal()
     }
     nextSampleUs = micros();
 
-    uint8_t sections = emg.setMainsNotch(MAINS_HZ, (float)ADC_RATE_HZ, NOTCH_BW_HZ);
+    uint8_t sections = emg.setMainsNotch(MAINS_HZ, (float)ADC_RATE_HZ, NOTCH_BW_HZ,
+                                  NOTCH_FUND_BW_HZ);
     if (sections > 0) {
         Serial.print(F("   ac_notch: "));
         Serial.print(sections);
-        Serial.print(F(" notches, "));
-        Serial.print(NOTCH_BW_HZ, 0);
-        Serial.print(F(" Hz wide, on "));
+        Serial.print(F(" notches on "));
         Serial.print(MAINS_HZ, 0);
         Serial.print(F("-"));
         Serial.print(MAINS_HZ * sections, 0);
-        Serial.println(F(" Hz"));
+        Serial.print(F(" Hz ("));
+        Serial.print(NOTCH_FUND_BW_HZ, 0);
+        Serial.print(F(" Hz wide at "));
+        Serial.print(MAINS_HZ, 0);
+        Serial.print(F(" Hz, "));
+        Serial.print(NOTCH_BW_HZ, 0);
+        Serial.println(F(" Hz on the rest)"));
     } else {
         Serial.println(F("   SAMPLE RATE TOO LOW to build a notch."));
     }

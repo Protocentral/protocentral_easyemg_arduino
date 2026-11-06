@@ -199,15 +199,25 @@ void phase4_alive()
 // Americas, Japan and a few others.
 const float MAINS_HZ = 50.0f;
 
-const uint16_t WINDOW_N = 300;   // samples averaged per reported figure
-const uint16_t SETTLE_N = 400;   // samples discarded after arming the notch
+// Notch widths for the live table, which notches every harmonic up to 450 Hz
+// (setMainsNotch) exactly as 06.OpenView does: wider at the fundamental, where the hum
+// is largest and changes fastest, narrow on the harmonics.
+const float NOTCH_FUND_BW_HZ = 6.0f;
+const float NOTCH_BW_HZ      = 2.0f;
 
-// Sampling is PACED, not free-running. A Q=4 notch at 50 Hz is only ~12.5 Hz wide,
-// so its coefficients must be built from the true rate: a 10% error puts the notch
-// at 45 Hz where it attenuates mains by under 4 dB. A free-running loop's average
-// rate is neither accurate nor uniform enough for that, so every measurement here
-// is taken on a fixed 1000 SPS schedule and the notch is armed from that exact
-// figure.
+// Width of the single notch the 'h' breakdown puts on each harmonic in turn. A little
+// wider than NOTCH_BW_HZ, so a drifting mains frequency still lands inside it.
+const float BREAKDOWN_BW_HZ = 4.0f;
+
+const uint16_t WINDOW_N = 300;   // samples averaged per reported figure
+const uint16_t SETTLE_N = 800;   // samples discarded after arming a notch
+
+// Sampling is PACED, not free-running. A 2 Hz notch at 450 Hz has to land within a
+// fraction of a hertz, so its coefficients must be built from the true rate: a 1%
+// error moves it 4.5 Hz, clean off the hum, while it still removes signal where it
+// sits. A free-running loop's average rate is neither accurate nor uniform enough
+// for that, so every measurement here is taken on a fixed 1000 SPS schedule and the
+// notch is armed from that exact figure.
 const long          ADC_RATE_HZ     = 1000L;
 const unsigned long ADC_INTERVAL_US = 1000000L / ADC_RATE_HZ;
 
@@ -254,8 +264,9 @@ float windowAcMicrovolts(int16_t *outPeakCounts, float *outDcCounts)
 }
 
 // Run the notch long enough for its transient to die before anything is measured.
-// A Q=4 notch at 50 Hz has a ~50-sample time constant at 2 kSPS, so a 300-sample
-// window measured immediately after arming is mostly settling, not signal.
+// A 2 Hz notch has a time constant of about 1/(pi x 2 Hz) = 160 ms, so a window
+// measured straight after arming it is mostly settling, not signal. 800 samples at
+// 1000 SPS is five time constants.
 void settleNotch()
 {
     for (uint16_t i = 0; i < SETTLE_N; i++) {
@@ -263,34 +274,59 @@ void settleNotch()
     }
 }
 
-// AC RMS with a notch at the given frequency, settled first. 0 means no notch.
-float measureWithNotch(float hz, int16_t *peak, float *dc)
+// AC RMS with no notch.
+float measureRaw(int16_t *peak, float *dc)
 {
-    if (hz > 0.0f) {
-        emg.setNotch(hz, (float)ADC_RATE_HZ);
-        settleNotch();
-    } else {
-        emg.disableNotch();
-    }
-    float uv = windowAcMicrovolts(peak, dc);
+    emg.disableNotch();
+    return windowAcMicrovolts(peak, dc);
+}
+
+// AC RMS with ONE notch at hz, BREAKDOWN_BW_HZ wide, settled first.
+//
+// setNotch() takes a Q, and its design narrows towards Nyquist: Q = hz / bandwidth
+// would make the 450 Hz notch about a tenth as wide as the 50 Hz one. This Q gives
+// the same -3 dB width at every frequency, matching setMainsNotch().
+float measureWithNotch(float hz)
+{
+    const float pi = 3.14159265358979f;
+    float w0 = 2.0f * pi * hz / (float)ADC_RATE_HZ;
+    float q  = sinf(w0) / (2.0f * tanf(pi * BREAKDOWN_BW_HZ / (float)ADC_RATE_HZ));
+
+    emg.setNotch(hz, (float)ADC_RATE_HZ, q);
+    settleNotch();
+    float uv = windowAcMicrovolts(NULL, NULL);
+    emg.disableNotch();
+    return uv;
+}
+
+// AC RMS with a notch on every mains harmonic, settled first. Reports how many
+// notches the library built through *sections, if given.
+float measureWithMainsNotch(uint8_t *sections = NULL)
+{
+    uint8_t n = emg.setMainsNotch(MAINS_HZ, (float)ADC_RATE_HZ, NOTCH_BW_HZ,
+                                  NOTCH_FUND_BW_HZ);
+    if (sections) *sections = n;
+    settleNotch();
+    float uv = windowAcMicrovolts(NULL, NULL);
     emg.disableNotch();
     return uv;
 }
 
 // Where is the interference actually sitting? Notch each mains harmonic in turn and
-// see how much RMS each one removes. 50 Hz is the fundamental; 100 and 150 Hz are the
-// harmonics that a single notch leaves completely untouched.
+// see how much RMS each one removes, then all of them together. 50 Hz is the
+// fundamental; a single 50 Hz notch leaves every harmonic above it untouched.
 void harmonicBreakdown()
 {
     Serial.println();
     Serial.println(F("--- HARMONIC BREAKDOWN ----------------------------------"));
+    Serial.println(F("   Stay relaxed: this takes about 12 seconds."));
     nextSampleUs = micros();
 
     int16_t pk = 0;
     float   dc = 0.0f;
-    float base = measureWithNotch(0.0f, &pk, &dc);
+    float base = measureRaw(&pk, &dc);
 
-    Serial.print(F("   unfiltered : "));
+    Serial.print(F("   unfiltered     : "));
     Serial.print(base, 1);
     Serial.print(F(" uV RMS   (peak "));
     Serial.print(pk);
@@ -299,26 +335,40 @@ void harmonicBreakdown()
     Serial.println(F(" cts)"));
     Serial.println();
 
-    const float harmonics[3] = {50.0f, 100.0f, 150.0f};
-    for (uint8_t i = 0; i < 3; i++) {
-        float uv  = measureWithNotch(harmonics[i], NULL, NULL);
+    // Every harmonic below 0.45x the sample rate: 50-450 Hz, or 60-420 Hz.
+    for (float hz = MAINS_HZ; hz <= 0.45f * (float)ADC_RATE_HZ; hz += MAINS_HZ) {
+        float uv  = measureWithNotch(hz);
         float pct = (base > 0.01f) ? (100.0f * (base - uv) / base) : 0.0f;
         if (pct < 0.0f) pct = 0.0f;
 
         Serial.print(F("   notch "));
-        Serial.print(harmonics[i], 0);
-        Serial.print(F(" Hz : "));
+        if (hz < 100.0f) Serial.print(' ');
+        Serial.print(hz, 0);
+        Serial.print(F(" Hz   : "));
         Serial.print(uv, 1);
         Serial.print(F(" uV RMS   removes "));
         Serial.print(pct, 0);
         Serial.println(F("%"));
     }
 
+    uint8_t sections = 0;
+    float all    = measureWithMainsNotch(&sections);
+    float allPct = (base > 0.01f) ? (100.0f * (base - all) / base) : 0.0f;
+    if (allPct < 0.0f) allPct = 0.0f;
+    Serial.print(F("   all harmonics  : "));
+    Serial.print(all, 1);
+    Serial.print(F(" uV RMS   removes "));
+    Serial.print(allPct, 0);
+    Serial.print(F("%   ("));
+    Serial.print(sections);
+    Serial.println(F(" notches)"));
+
     Serial.println();
     Serial.println(F("   If 50 Hz removes most of it, a single notch is enough."));
-    Serial.println(F("   If 100/150 Hz remove comparable amounts, the energy is in the"));
-    Serial.println(F("   harmonics - which is what high electrode impedance produces,"));
-    Serial.println(F("   and no single notch will fix it. Fix the electrodes."));
+    Serial.println(F("   If 100 or 150 Hz removes the most, the hum is in the harmonics."));
+    Serial.println(F("   Room lighting (LED drivers, fluorescent) and high electrode"));
+    Serial.println(F("   impedance both do this, even on a battery-powered host. Re-run"));
+    Serial.println(F("   'h' with the lights off: if the harmonics drop, it is the room."));
     Serial.println(F("   If none of them remove much, it is broadband, not mains."));
     Serial.println();
     Serial.println(F("   peak(cts)  DC(cts)  ac_raw(uV)  ac_notch(uV)  hum%   verdict"));
@@ -345,10 +395,22 @@ void phase5_signal()
     }
     nextSampleUs = micros();
 
-    if (emg.setNotch(MAINS_HZ, (float)ADC_RATE_HZ)) {
-        Serial.print(F("   notch armed at "));
+    uint8_t sections = emg.setMainsNotch(MAINS_HZ, (float)ADC_RATE_HZ, NOTCH_BW_HZ,
+                                  NOTCH_FUND_BW_HZ);
+    if (sections > 0) {
+        Serial.print(F("   ac_notch: "));
+        Serial.print(sections);
+        Serial.print(F(" notches on "));
         Serial.print(MAINS_HZ, 0);
-        Serial.println(F(" Hz"));
+        Serial.print(F("-"));
+        Serial.print(MAINS_HZ * sections, 0);
+        Serial.print(F(" Hz ("));
+        Serial.print(NOTCH_FUND_BW_HZ, 0);
+        Serial.print(F(" Hz wide at "));
+        Serial.print(MAINS_HZ, 0);
+        Serial.print(F(" Hz, "));
+        Serial.print(NOTCH_BW_HZ, 0);
+        Serial.println(F(" Hz on the rest)"));
     } else {
         Serial.println(F("   SAMPLE RATE TOO LOW to build a notch."));
     }
@@ -391,9 +453,9 @@ void shortedInputTest()
 
     int16_t peak = 0;
     float   dc   = 0.0f;
-    float rawUv = measureWithNotch(0.0f, &peak, &dc);
+    float rawUv = measureRaw(&peak, &dc);
 
-    float notchedUv = measureWithNotch(MAINS_HZ, NULL, NULL);
+    float notchedUv = measureWithMainsNotch();
 
     Serial.print(F("   peak "));       Serial.print(peak);
     Serial.print(F(" counts   DC "));  Serial.print(dc, 0);
@@ -435,8 +497,8 @@ void reportWindow()
     int16_t peak = 0;
     float   dc   = 0.0f;
 
-    float rawUv     = measureWithNotch(0.0f, &peak, &dc);
-    float notchedUv = measureWithNotch(MAINS_HZ, NULL, NULL);
+    float rawUv     = measureRaw(&peak, &dc);
+    float notchedUv = measureWithMainsNotch();
 
     float humPct = (rawUv > 0.01f) ? (100.0f * (rawUv - notchedUv) / rawUv) : 0.0f;
     if (humPct < 0.0f) humPct = 0.0f;
@@ -462,7 +524,7 @@ void reportWindow()
     } else if (peak > 1000) {
         Serial.println(F("HUGE - ~100x physiological. Not muscle."));
     } else if (humPct > 60.0f && rawUv > 100.0f) {
-        Serial.println(F("hum dominated - electrode impedance, not the board"));
+        Serial.println(F("hum dominated - electrodes or room lighting, not the board"));
     } else if (rawUv < 20.0f) {
         Serial.println(F("quiet - at or near the board noise floor"));
     } else if (notchedUv < 150.0f) {

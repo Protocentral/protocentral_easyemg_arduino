@@ -9,8 +9,8 @@ the signal actually doing. Two interactive commands:
 
 - **`s`** — shorted-input test. Bridge E1+E2+REF through 10 kΩ, no body in the loop.
   Whatever remains is the board and cable's own contribution.
-- **`h`** — harmonic breakdown. Notches 50, 100 and 150 Hz in turn and reports how much
-  each removes.
+- **`h`** — harmonic breakdown. Notches each mains harmonic up to 450 Hz in turn, then
+  all of them together, and reports how much each removes.
 
 ---
 
@@ -25,8 +25,8 @@ peak(cts)  DC(cts)  ac_raw(uV)  ac_notch(uV)  hum%   verdict
 | `peak` | Full scale is ±2048. Anything near it is clipped and every other number is meaningless. |
 | `DC` | Should be near zero. Large values mean a stale baseline — relax and reset. |
 | `ac_raw` | AC RMS in µV at the electrodes, unfiltered |
-| `ac_notch` | Same with the mains notch applied |
-| `hum%` | How much of the RMS the notch removed |
+| `ac_notch` | Same with a notch on every mains harmonic (`setMainsNotch()`: 6 Hz at the fundamental, 2 Hz on the rest) |
+| `hum%` | How much of the RMS the notches removed |
 
 Reference levels, µV RMS at the electrodes:
 
@@ -59,6 +59,32 @@ impedance — fresh Ag/AgCl pads, alcohol-wiped skin left to dry, REF pressed fi
 **bone**. Target `ac_raw` under 100 µV relaxed, and watch that single number while
 re-placing electrodes rather than judging traces.
 
+**Hum at 100 or 150 Hz with the host on battery.** Not the host: the room. LED drivers,
+fluorescent ballasts and nearby mains wiring couple into the body and the leads, and their
+energy sits on the harmonics rather than at 50 Hz, so a single 50 Hz notch leaves it all.
+One bench recording had 71% of its resting power in a single 150 Hz line. Run `h` with the
+lights on and off. `setMainsNotch()` (on by default in `06.OpenView`) removes it, but move
+away from the source or shorten and twist the leads if you can.
+
+**Hum that grows during a contraction.** Contracting changes the electrode–skin contact, and
+any imbalance between E1 and E2 turns hum on the body into signal. The envelope and %MVC
+then count the hum as effort, so an MVC recorded like this reads high and every later %MVC
+reads low. Fresh pads, dry skin and leads that don't move; re-record the MVC once the hum
+is under control.
+
+**Short 50 Hz bursts on a quiet trace.** A notch removes a steady tone, but when the hum
+jumps (you move, a load switches) it passes the change until it settles, about
+1/(π × width). With a 2 Hz notch at 50 Hz that was a 0.4 s burst of up to 100 µV;
+`setMainsNotch()` now makes the fundamental 6 Hz wide, which ends it in about 0.1 s. If
+they persist, the 50 Hz pickup itself is large: work on electrodes and lead routing.
+
+**%MVC far above 100%.** The MVC was recorded from a weak contraction, usually because the
+step ran at reset or when the host opened the port, with the arm relaxed. One bench run
+read 250–360% against a 110 µV reference. `06.OpenView` now refuses an MVC under 5× the
+resting level and, with `MVC_AUTO_RAISE`, raises it on the first harder contraction.
+Record it properly: relax for 2 s, then contract as hard as you can while the LED is lit,
+or press **Record MVC** in OpenView.
+
 **Huge signal, ~100× physiological, rails the ADC.** Check the electrodes are actually
 attached. Floating inputs are biased through 1 MΩ and act as antennas; nothing
 downstream of a railed input is meaningful, including the envelope.
@@ -80,17 +106,19 @@ that the Qwiic 3V3 pin lands on the LDO *output* — see the hardware repo's Rev
 
 Every one of these produced a misleading measurement during Rev 1 bring-up.
 
-**1. The notch needs *paced* sampling.** The notch is only about `f/Q` wide — 12.5 Hz at
-50 Hz with the default Q=4 — so its coefficients must be built from the true sample
-rate. A 10% error puts it at 45 Hz, where it attenuates mains by under 4 dB: inert,
+**1. The notch needs *paced* sampling.** `setNotch()` is only about `f/Q` wide — 12.5 Hz
+at 50 Hz with the default Q=4 — and the `setMainsNotch()` notches are 6 Hz and 2 Hz wide, so the
+coefficients must be built from the true sample rate. A 10% error puts it at 45 Hz, where it attenuates mains by under 4 dB: inert,
 while still removing signal at the wrong frequency. A free-running loop's *average* rate
 is not accurate enough, and its jitter smears the filter further. Sample on a timed
 schedule and pass that exact rate. Both `06.OpenView` and `07.Diagnostics` pace at a
 fixed 1000 SPS for this reason.
 
-**2. Let the notch settle before measuring.** A Q=4 notch at 50 Hz has a ~50-sample time
-constant. Measure immediately after arming it and the transient dominates the window.
-Discard ~400 samples first. *Symptom: notched RMS larger than unnotched.*
+**2. Let the notch settle before measuring.** A notch's time constant is about
+1/(π × bandwidth): 25 ms for a Q=4 notch at 50 Hz, 53 ms for a 6 Hz notch and 160 ms for
+a 2 Hz notch. Measure
+immediately after arming it and the transient dominates the window. `07.Diagnostics`
+discards 800 samples (0.8 s) first. *Symptom: notched RMS larger than unnotched.*
 
 **3. RMS about zero conflates DC with signal.** Compute AC RMS about the window's own
 mean, and report DC separately.

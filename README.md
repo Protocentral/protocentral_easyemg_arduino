@@ -42,7 +42,7 @@ The board has no data-ready pin, so your host polls the ADC. The rate you get de
 - Muscle-activation detection, with a threshold you set from your own noise floor
 - %MVC normalisation, to compare effort across subjects and sessions
 - One-call baseline zeroing
-- Optional software mains notch and digital high-pass
+- Optional software mains notch, on the fundamental or on every harmonic, and digital high-pass
 - No dependencies. Runs on AVR, Uno R4, Nano 33 BLE, ESP32 and RP2040
 
 > **Not a medical device. For research and education only.** The breakout has no patient isolation: when electrodes are on a person, power the host from a battery or connect through an [easyISO isolated Qwiic adapter](https://protocentral.com/product/easyiso-isolated-qwiic-adapter/).
@@ -117,16 +117,23 @@ Take one sample per loop. `readEnvelope()` reads the ADC, and `lastRaw()` and `l
 | `calibrateBaseline(samples = 256)` | Measure and subtract the resting offset |
 | `setActivationThreshold(uV)` / `bool isActive()` | Compare the last envelope with a threshold |
 | `setMVC(uV)` / `float readPercentMVC()` | Last envelope as a percentage of MVC |
-| `bool setNotch(mainsHz, sampleRateHz, q = 4.0f)` / `disableNotch()` | Software mains notch, off by default |
+| `bool setNotch(mainsHz, sampleRateHz, q = 4.0f)` / `disableNotch()` | One software notch at the mains frequency, off by default |
+| `uint8_t setMainsNotch(mainsHz, sampleRateHz, bandwidthHz = 2.0f, fundamentalBandwidthHz = 6.0f, maxHarmonics = 0)` | A notch on every mains harmonic up to 0.45× the sample rate, wider at the fundamental. Returns how many it built |
 | `bool setHighPass(cornerHz, sampleRateHz)` / `disableHighPass()` | 2nd-order digital high-pass, off by default |
 
 The full API is documented in [ProtoCentral_easyEMG.h](src/ProtoCentral_easyEMG.h).
 
 ## Notch and high-pass
 
-Both filters need your exact sample rate, so sample on a timed schedule, as `06.OpenView` does at a fixed 1000 SPS. The notch is only about 12.5 Hz wide at 50 Hz, so the average rate of a free-running loop isn't accurate enough.
+Both filters need your exact sample rate, so sample on a timed schedule, as `06.OpenView` does at a fixed 1000 SPS. The notches are narrow (12.5 Hz at 50 Hz for `setNotch()`, 6 Hz and 2 Hz for `setMainsNotch()`), so the average rate of a free-running loop isn't accurate enough.
 
-The notch also removes real signal. Fix the usual causes first: a REF electrode on muscle instead of bone, dried-out gel or a mains-powered host. `07.Diagnostics` reports how much of your signal is mains.
+Hum on a person is often strongest at 100 or 150 Hz, not 50 Hz, even with the host on battery: room lighting and nearby wiring couple into the body and leads. `setNotch()` only removes the fundamental. `setMainsNotch()` puts a notch on every harmonic (50–450 Hz at 1000 SPS): 6 Hz wide at the fundamental and 2 Hz on the rest, about 7% of the sEMG in all. `06.OpenView` uses it by default. The fundamental is wider because 50/60 Hz pickup is usually the largest and jumps when the subject moves, and a notch passes each jump until it settles, about 1/(π × width): 0.4 s of 50 Hz burst at 2 Hz, 0.1 s at 6 Hz. Mains frequency drifts, and the drift grows with the harmonic, so the upper notches are shallower; widen `bandwidthHz` for more depth at more cost. 8-bit AVR boards stop at three harmonics (`EASYEMG_MAX_NOTCH_SECTIONS`), because they can't run nine filters at 1000 SPS.
+
+A notch also removes real signal. Fix the usual causes first: a REF electrode on muscle instead of bone, dried-out gel, a mains-powered host or lighting close to the subject. `07.Diagnostics` reports how much of your signal sits on each harmonic.
+
+## %MVC in 06.OpenView
+
+`06.OpenView` sends %MVC, the smoothed envelope as a percentage of a maximum voluntary contraction (MVC), and records the MVC itself. After reset, or when the host sends `m` (OpenView's **Record MVC** button), it asks you to relax for 2 s, which also measures your resting level, then lights the LED for 5 s: contract as hard as you can until it goes out. It refuses an MVC under 100 µV or under 5× your resting level, because a weak reference makes every later reading several hundred percent, and blinks the LED instead. With `MVC_AUTO_RAISE` on, a stronger contraction later becomes the new MVC, so %MVC stays at or below 100. Byte 6 of each packet reports the step, so OpenView can show when to relax and when to contract.
 
 ## Examples
 

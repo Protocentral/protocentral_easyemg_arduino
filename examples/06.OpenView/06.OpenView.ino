@@ -15,12 +15,13 @@
 // ---- Packet format -----------------------------------------------------------
 //
 // ProtoCentral framing: 0x0A 0xFA <len> 0x00 <type> <payload...> 0x00 0x0B
-// The payload is 8 bytes, all int16 little-endian:
+// The payload is 8 bytes, little-endian:
 //
-//     [0-1]  sEMG          (signed counts, +/-2048)
-//     [2-3]  RMS envelope  (counts, 0..2048)
-//     [4-5]  %MVC          (0 until an MVC has been recorded)
-//     [6-7]  Reserved, always 0
+//     [0-1]  sEMG          int16 (signed counts, +/-2048)
+//     [2-3]  RMS envelope  int16 (counts, 0..2048), smoothed
+//     [4-5]  %MVC          int16 (0 until an MVC has been recorded)
+//     [6]    MVC step      0 no MVC yet, 1 relax, 2 contract now, 3 too weak, 4 MVC set
+//     [7]    Reserved, always 0
 //
 // ---- Sample rate, and why this oversamples ------------------------------------
 //
@@ -48,27 +49,57 @@
 //
 // ---- Recording the MVC ---------------------------------------------------------
 //
-// With RECORD_MVC on, the on-board LED lights about a second after reset: contract as
-// hard as you can until it goes out, 5 seconds later. Data streams throughout, so you
-// can watch it in OpenView. Opening the serial port resets some boards, which starts
-// the step again.
+// %MVC is the envelope as a percentage of a maximum voluntary contraction (MVC). The
+// step that records it runs after reset (RECORD_MVC), and again whenever the host
+// sends 'm': OpenView's Record MVC button, or the Serial Monitor.
 //
-// %MVC stays 0 until the step finishes, and stays 0 afterwards if the peak was below
-// MVC_MIN_UV, because a reference taken from a relaxed muscle gives meaningless
-// readings. Press reset to try again.
+//   1. Relax for 2 seconds. The filters settle, and the last second is taken as your
+//      resting level.
+//   2. The on-board LED lights: contract as hard as you can until it goes out, 5
+//      seconds later.
+//
+// The MVC is the highest smoothed envelope in those 5 seconds, the same envelope
+// OpenView plots, and %MVC is worked out from that envelope too. The step refuses an
+// MVC below MVC_MIN_UV or below MVC_MIN_REST_RATIO times your resting level: a
+// reference taken from a relaxed or barely tensed muscle makes every later reading
+// several hundred percent. A refused step blinks the LED and keeps the previous MVC.
+//
+// With MVC_AUTO_RAISE on, a later contraction stronger than the MVC becomes the new
+// MVC, so %MVC never passes 100 and a weak reference corrects itself on the first
+// hard contraction. A stray artifact that big raises it too, so turn it off for
+// measurements and record the MVC properly.
+//
+// Opening the serial port resets some boards, which starts the step again: relax while
+// you connect. Byte 6 of every packet carries the step's state, so OpenView can tell
+// you when to relax and when to contract.
 //
 // ---- Mains notch ---------------------------------------------------------------
 //
-// USE_NOTCH arms the library's 50/60 Hz notch, and it works here because the sample
-// rate is FIXED and therefore exactly known.
+// USE_NOTCH arms the library's harmonic notch: a notch on every multiple of MAINS_HZ
+// up to 450 Hz (50, 100 ... 450 Hz, or 60 ... 420 Hz), 6 Hz wide at the fundamental and
+// 2 Hz wide on the harmonics.
 //
-// That matters more than it sounds. A Q=4 notch at 50 Hz is only about 12.5 Hz wide,
-// so its coefficients have to be built from the true sample rate. Get the rate wrong
-// by 10% and the notch lands at 45 Hz, where it attenuates mains by under 4 dB -
-// effectively not working, while still removing signal at the wrong frequency. A
-// free-running loop cannot hold its rate anywhere near tightly enough, and the
-// per-packet serial write makes the intervals non-uniform on top of that. Pacing the
-// ADC on a timer removes both problems.
+// The hum on a person is rarely just 50 Hz. Even with the host on battery, LED drivers,
+// fluorescent lights and nearby wiring put most of it at 100 and 150 Hz, which a single
+// 50 Hz notch leaves untouched, and it can grow during a contraction. On one bench recording
+// this took the resting level from about 80 to about 17 uV RMS. The notches together
+// cost about 7% of the sEMG.
+//
+// The fundamental is wider because 50/60 Hz pickup is usually the largest and jumps
+// when you move. A notch only removes a STEADY tone: after a jump it lets the change
+// through until it settles, about 1/(pi x width). At 2 Hz that showed as 50 Hz bursts
+// lasting about 0.4 s on a quiet trace; at 6 Hz they are over in about 0.1 s.
+//
+// It works here because the sample rate is FIXED and therefore exactly known. A 2 Hz
+// notch at 450 Hz has to land within a fraction of a hertz, so its coefficients have
+// to be built from the true sample rate. A free-running loop cannot hold its rate
+// anywhere near tightly enough, and the per-packet serial write makes the intervals
+// non-uniform on top of that. Pacing the ADC on a timer removes both problems.
+//
+// The mains frequency itself drifts by a fraction of a percent, and the drift grows
+// with the harmonic, so the upper notches are shallower than the lower ones. Widen
+// NOTCH_BW_HZ to trade more signal for more depth. On an 8-bit AVR the library stops
+// at 150 Hz: it cannot run nine filters at 1000 SPS.
 //
 // A notch still costs real in-band signal, so turn it off for anything you intend to
 // quote as a measurement.
@@ -76,7 +107,8 @@
 // SAFETY: power the host from a BATTERY when the subject is a person. A
 // mains-connected host couples the body to earth and the front-end saturates on
 // common-mode hum - the symptom is no visible bursts at all, not merely a noisy
-// trace.
+// trace. A battery host can still pick up hum from the room; that is what the notch
+// is for.
 //
 // Download OpenView: https://github.com/Protocentral/protocentral_openview
 
@@ -97,16 +129,22 @@ easyEMG emg;
 #define DATA_LEN               0x08
 #define ZERO                   0
 
-// Record a maximum voluntary contraction after reset so OpenView can show %MVC.
-// Set to false to skip the step; %MVC then stays 0.
-#define RECORD_MVC             true
-#define MVC_SETTLE_MS          1000L    // lets the filters settle before recording
-#define MVC_RECORD_MS          5000L
-#define MVC_MIN_UV             100.0f   // about a light contraction
+// Maximum voluntary contraction (MVC) for %MVC; see "Recording the MVC" above.
+#define RECORD_MVC             true     // run the MVC step after reset
+#define MVC_SETTLE_MS          2000L    // relax: filters settle, last second = rest level
+#define MVC_RECORD_MS          5000L    // LED lit: contract as hard as you can
+#define MVC_MIN_UV             100.0f   // refuse an MVC below this ...
+#define MVC_MIN_REST_RATIO     5.0f     // ... or below this many times the rest level
+#define MVC_AUTO_RAISE         true     // a stronger contraction becomes the new MVC
+#define MVC_COMMAND            'm'      // host command that runs the step again
 
-// Mains notch. Set MAINS_HZ to 50 or 60; set USE_NOTCH to false to disable.
+// Mains notch on every harmonic up to 450 Hz. Set MAINS_HZ to 50 or 60; set USE_NOTCH
+// to false to disable. NOTCH_FUND_BW_HZ is the width at the fundamental, NOTCH_BW_HZ
+// on each harmonic.
 #define USE_NOTCH              true
 #define MAINS_HZ               50.0f
+#define NOTCH_FUND_BW_HZ       6.0f
+#define NOTCH_BW_HZ            2.0f
 
 // Digital high-pass corner; set to 0 to disable.
 #define HIGH_PASS_HZ           20.0f
@@ -119,9 +157,9 @@ easyEMG emg;
 // or 128 ms at 1000 SPS; this EMA makes the displayed envelope calmer on a chart.
 #define ENVELOPE_SMOOTH_MS     120.0f
 
-volatile char dataPacket[DATA_LEN];
-const char dataPacketFooter[2] = {ZERO, CES_CMDIF_PKT_STOP};
-const char dataPacketHeader[5] = {CES_CMDIF_PKT_START_1, CES_CMDIF_PKT_START_2,
+volatile uint8_t dataPacket[DATA_LEN];
+const uint8_t dataPacketFooter[2] = {ZERO, CES_CMDIF_PKT_STOP};
+const uint8_t dataPacketHeader[5] = {CES_CMDIF_PKT_START_1, CES_CMDIF_PKT_START_2,
                                   DATA_LEN, ZERO, CES_CMDIF_TYPE_DATA};
 
 // 500 Hz packet rate, matching OpenView's easyEMG profile.
@@ -140,43 +178,105 @@ uint16_t rawCount = 0;
 float envSmooth = 0.0f;
 const float ENV_ALPHA = (SAMPLE_INTERVAL_US / 1000.0f) / ENVELOPE_SMOOTH_MS;
 
-#if RECORD_MVC
-// Samples left in the MVC step, counting down through settling and then recording.
-long  mvcSamplesLeft = 0;
-float mvcPeak        = 0.0f;
+// Microvolts at the electrodes per ADC count; set in setup() from the ADC range.
+float uvPerCount = 0.0f;
 
-// Called once per ADC sample, so the step shares the paced rate the notch and high-pass
-// were built for.
-void updateMvcStep()
+// ---- MVC step ------------------------------------------------------------------
+// Runs once per packet (500 Hz) on the smoothed envelope, in uV.
+
+const uint16_t PACKETS_PER_SEC = 500;
+
+enum MvcState : uint8_t {
+    MVC_NONE     = 0,   // no MVC yet
+    MVC_RELAX    = 1,   // settling; the last second is the rest level
+    MVC_CONTRACT = 2,   // LED lit: contract now
+    MVC_TOO_WEAK = 3,   // refused; shown for 2 s while the LED blinks
+    MVC_SET      = 4,   // an MVC is in use
+};
+
+MvcState mvcState       = MVC_NONE;
+uint16_t mvcPacketsLeft = 0;
+float    mvcUv          = 0.0f;   // the MVC in use, 0 = none
+float    mvcPeakUv      = 0.0f;   // highest envelope in the current step
+float    restUv         = 0.0f;   // resting level from the last step
+float    restSumUv      = 0.0f;
+uint16_t restCount      = 0;
+
+void startMvcStep()
 {
-    if (mvcSamplesLeft == 0) {
-        return;
-    }
-    mvcSamplesLeft--;
+    mvcState       = MVC_RELAX;
+    mvcPacketsLeft = (uint16_t)((MVC_SETTLE_MS * PACKETS_PER_SEC) / 1000L);
+    mvcPeakUv      = 0.0f;
+    restSumUv      = 0.0f;
+    restCount      = 0;
+    digitalWrite(LED_BUILTIN, LOW);
+}
 
-    const long recordSamples = (MVC_RECORD_MS * ADC_RATE_HZ) / 1000L;
-    if (mvcSamplesLeft >= recordSamples) {
-        if (mvcSamplesLeft == recordSamples) {
+// Smallest envelope accepted as an MVC.
+float mvcThresholdUv()
+{
+    float t = MVC_MIN_REST_RATIO * restUv;
+    return (t > MVC_MIN_UV) ? t : MVC_MIN_UV;
+}
+
+void updateMvc(float envUv)
+{
+    switch (mvcState) {
+    case MVC_RELAX:
+        if (mvcPacketsLeft <= PACKETS_PER_SEC) {     // last second of the settle
+            restSumUv += envUv;
+            restCount++;
+        }
+        if (--mvcPacketsLeft == 0) {
+            restUv         = (restCount > 0) ? (restSumUv / (float)restCount) : 0.0f;
+            mvcState       = MVC_CONTRACT;
+            mvcPacketsLeft = (uint16_t)((MVC_RECORD_MS * PACKETS_PER_SEC) / 1000L);
             digitalWrite(LED_BUILTIN, HIGH);
         }
         return;
+
+    case MVC_CONTRACT:
+        if (envUv > mvcPeakUv) {
+            mvcPeakUv = envUv;
+        }
+        if (--mvcPacketsLeft == 0) {
+            digitalWrite(LED_BUILTIN, LOW);
+            if (mvcPeakUv >= mvcThresholdUv()) {
+                mvcUv    = mvcPeakUv;
+                mvcState = MVC_SET;
+                emg.setMVC(mvcUv);
+            } else {
+                mvcState       = MVC_TOO_WEAK;
+                mvcPacketsLeft = 2 * PACKETS_PER_SEC;
+            }
+        }
+        return;
+
+    case MVC_TOO_WEAK:
+        digitalWrite(LED_BUILTIN, ((mvcPacketsLeft / 50) & 1) ? HIGH : LOW);   // 5 Hz blink
+        if (--mvcPacketsLeft == 0) {
+            digitalWrite(LED_BUILTIN, LOW);
+            mvcState = (mvcUv > 0.0f) ? MVC_SET : MVC_NONE;
+        }
+        break;
+
+    default:
+        break;
     }
 
-    float e = emg.lastEnvelope();
-    if (e > mvcPeak) {
-        mvcPeak = e;
-    }
-
-    if (mvcSamplesLeft == 0) {
-        digitalWrite(LED_BUILTIN, LOW);
-        if (mvcPeak >= MVC_MIN_UV) {
-            emg.setMVC(mvcPeak);
+#if MVC_AUTO_RAISE
+    if (envUv >= mvcThresholdUv() && envUv > mvcUv) {
+        mvcUv = envUv;
+        emg.setMVC(mvcUv);
+        if (mvcState == MVC_NONE) {
+            mvcState = MVC_SET;
         }
     }
-}
 #endif
+}
 
-void sendDataPacket(int16_t emgCounts, int16_t envelope, int16_t percentMvc)
+void sendDataPacket(int16_t emgCounts, int16_t envelope, int16_t percentMvc,
+                    uint8_t mvcStep)
 {
     dataPacket[0] = emgCounts;
     dataPacket[1] = emgCounts >> 8;
@@ -187,7 +287,7 @@ void sendDataPacket(int16_t emgCounts, int16_t envelope, int16_t percentMvc)
     dataPacket[4] = percentMvc;
     dataPacket[5] = percentMvc >> 8;
 
-    dataPacket[6] = 0;
+    dataPacket[6] = mvcStep;
     dataPacket[7] = 0;
 
     for (int i = 0; i < 5; i++) {
@@ -230,17 +330,20 @@ void setup()
     emg.setEnvelopeWindow(easyEMG::EASYEMG_MAX_ENVELOPE_WINDOW);
 
 #if USE_NOTCH
-    // The rate is fixed and known exactly, so the coefficients are exact.
-    emg.setNotch(MAINS_HZ, (float)ADC_RATE_HZ);
+    // The rate is fixed and known exactly, so the coefficients are exact. Builds one
+    // notch per harmonic: 9 at 50 Hz mains, 7 at 60 Hz, 3 on AVR.
+    emg.setMainsNotch(MAINS_HZ, (float)ADC_RATE_HZ, NOTCH_BW_HZ, NOTCH_FUND_BW_HZ);
 #endif
 
     // Leaves the filter off when HIGH_PASS_HZ is 0.
     emg.setHighPass(HIGH_PASS_HZ, (float)ADC_RATE_HZ);
 
-#if RECORD_MVC
+    uvPerCount = emg.fullScaleVolts() / 2048.0f * 1000000.0f / EASYEMG_GAIN;
+
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, LOW);
-    mvcSamplesLeft = ((MVC_SETTLE_MS + MVC_RECORD_MS) * ADC_RATE_HZ) / 1000L;
+#if RECORD_MVC
+    startMvcStep();
 #endif
 
     envSmooth   = 0.0f;
@@ -271,10 +374,6 @@ void loop()
     rawAccum += emg.lastRaw();
     rawCount++;
 
-#if RECORD_MVC
-    updateMvcStep();
-#endif
-
     if (rawCount < SAMPLES_PER_PACKET) {
         return;
     }
@@ -287,7 +386,18 @@ void loop()
     // buffer, so this is what actually sets how calm the trace looks.
     envSmooth += ((float)envelope - envSmooth) * ENV_ALPHA;
 
-    int16_t pctMVC = (int16_t)emg.readPercentMVC();
+    // 'm' from the host (OpenView's Record MVC button) runs the MVC step again.
+    while (Serial.available() > 0) {
+        int c = Serial.read();
+        if (c == MVC_COMMAND || c == (MVC_COMMAND - 'a' + 'A')) {
+            startMvcStep();
+        }
+    }
 
-    sendDataPacket(raw, (int16_t)(envSmooth + 0.5f), pctMVC);
+    float envUv = envSmooth * uvPerCount;
+    updateMvc(envUv);
+
+    int16_t pctMVC = (mvcUv > 0.0f) ? (int16_t)(envUv / mvcUv * 100.0f + 0.5f) : 0;
+
+    sendDataPacket(raw, (int16_t)(envSmooth + 0.5f), pctMVC, (uint8_t)mvcState);
 }

@@ -48,9 +48,11 @@ easyEMG::easyEMG(uint8_t i2cAddress)
     _threshold = 0.0f;
     _mvc       = 0.0f;
 
-    _notchOn = false;
-    _nb0 = 1.0f; _nb1 = 0.0f; _nb2 = 0.0f; _na1 = 0.0f; _na2 = 0.0f;
-    _nz1 = 0.0f; _nz2 = 0.0f;
+    _notchCount = 0;
+    for (uint8_t i = 0; i < EASYEMG_MAX_NOTCH_SECTIONS; i++) {
+        _notch[i].b0 = 1.0f; _notch[i].b1 = 0.0f; _notch[i].a2 = 0.0f;
+        _notch[i].z1 = 0.0f; _notch[i].z2 = 0.0f;
+    }
 
     _hpOn = false;
     _hb0 = 1.0f; _hb1 = 0.0f; _hb2 = 0.0f; _ha1 = 0.0f; _ha2 = 0.0f;
@@ -158,7 +160,7 @@ int16_t easyEMG::readRaw()
         v = applyHighPass(v);
     }
 
-    if (_notchOn) {
+    if (_notchCount > 0) {
         v = applyNotch(v);
     }
 
@@ -175,9 +177,23 @@ int16_t easyEMG::readRaw()
 // Mains hum notch
 /////////////////////////////////////////////////////////////////////////////////////////
 
-// Standard RBJ notch biquad:
-//   b = [1, -2cos(w0), 1]
-//   a = [1 + alpha, -2cos(w0), 1 - alpha]
+// Every notch here is the same biquad shape:
+//   b = [1, -2cos(w0), 1] / (1 + alpha)
+//   a = [1, -2cos(w0) / (1 + alpha), (1 - alpha) / (1 + alpha)]
+// Only alpha differs between the two designs, so one helper builds both.
+void easyEMG::setNotchSection(uint8_t i, float hz, float sampleRateHz, float alpha)
+{
+    float w0 = 2.0f * 3.14159265358979f * hz / sampleRateHz;
+    float a0 = 1.0f + alpha;
+
+    _notch[i].b0 = 1.0f / a0;
+    _notch[i].b1 = (-2.0f * cosf(w0)) / a0;
+    _notch[i].a2 = (1.0f - alpha) / a0;
+    _notch[i].z1 = 0.0f;
+    _notch[i].z2 = 0.0f;
+}
+
+// Single notch, RBJ cookbook design: alpha = sin(w0) / (2Q).
 bool easyEMG::setNotch(float mainsHz, float sampleRateHz, float q)
 {
     // Need real headroom above the notch frequency for the design to mean anything.
@@ -186,44 +202,86 @@ bool easyEMG::setNotch(float mainsHz, float sampleRateHz, float q)
         return false;
     }
 
-    float w0    = 2.0f * 3.14159265358979f * mainsHz / sampleRateHz;
-    float cosw0 = cosf(w0);
-    float alpha = sinf(w0) / (2.0f * q);
-    float a0    = 1.0f + alpha;
-
-    _nb0 = 1.0f / a0;
-    _nb1 = (-2.0f * cosw0) / a0;
-    _nb2 = 1.0f / a0;
-    _na1 = (-2.0f * cosw0) / a0;
-    _na2 = (1.0f - alpha) / a0;
-
-    _nz1 = 0.0f;
-    _nz2 = 0.0f;
-    _notchOn = true;
+    float w0 = 2.0f * 3.14159265358979f * mainsHz / sampleRateHz;
+    setNotchSection(0, mainsHz, sampleRateHz, sinf(w0) / (2.0f * q));
+    _notchCount = 1;
 
     resetEnvelope();
     return true;
 }
 
+// One notch per harmonic, each exactly its bandwidth wide at -3 dB in the digital
+// domain: alpha = tan(pi * bandwidth / fs). Unlike the RBJ alpha this does not
+// narrow towards Nyquist, so 450 Hz at 1000 SPS gets the same width as 100 Hz.
+// The fundamental gets its own, wider bandwidth; see the header.
+uint8_t easyEMG::setMainsNotch(float mainsHz, float sampleRateHz, float bandwidthHz,
+                               float fundamentalBandwidthHz, uint8_t maxHarmonics)
+{
+    if (mainsHz <= 0.0f || sampleRateHz <= 0.0f ||
+        bandwidthHz <= 0.0f || bandwidthHz >= (mainsHz * 0.5f) ||
+        fundamentalBandwidthHz <= 0.0f || fundamentalBandwidthHz >= (mainsHz * 0.5f)) {
+        disableNotch();
+        return 0;
+    }
+
+    const float pi        = 3.14159265358979f;
+    const float top       = 0.45f * sampleRateHz;
+    const float alpha     = tanf(pi * bandwidthHz / sampleRateHz);
+    const float alphaFund = tanf(pi * fundamentalBandwidthHz / sampleRateHz);
+
+    uint8_t n = 0;
+    while (n < EASYEMG_MAX_NOTCH_SECTIONS) {
+        if (maxHarmonics != 0 && n >= maxHarmonics) {
+            break;
+        }
+        float hz = mainsHz * (float)(n + 1);
+        if (hz > top) {
+            break;
+        }
+        setNotchSection(n, hz, sampleRateHz, (n == 0) ? alphaFund : alpha);
+        n++;
+    }
+
+    if (n == 0) {
+        disableNotch();
+        return 0;
+    }
+
+    _notchCount = n;
+    resetEnvelope();
+    return n;
+}
+
 void easyEMG::disableNotch()
 {
-    _notchOn = false;
-    _nz1 = 0.0f;
-    _nz2 = 0.0f;
+    _notchCount = 0;
+    for (uint8_t i = 0; i < EASYEMG_MAX_NOTCH_SECTIONS; i++) {
+        _notch[i].z1 = 0.0f;
+        _notch[i].z2 = 0.0f;
+    }
     resetEnvelope();
 }
 
 bool easyEMG::notchEnabled()
 {
-    return _notchOn;
+    return _notchCount > 0;
+}
+
+uint8_t easyEMG::notchSections()
+{
+    return _notchCount;
 }
 
 float easyEMG::applyNotch(float x)
 {
-    float y = (_nb0 * x) + _nz1;
-    _nz1 = (_nb1 * x) - (_na1 * y) + _nz2;
-    _nz2 = (_nb2 * x) - (_na2 * y);
-    return y;
+    for (uint8_t i = 0; i < _notchCount; i++) {
+        NotchSection &s = _notch[i];
+        float y = (s.b0 * x) + s.z1;
+        s.z1 = (s.b1 * x) - (s.b1 * y) + s.z2;
+        s.z2 = (s.b0 * x) - (s.a2 * y);
+        x = y;
+    }
+    return x;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -407,8 +465,10 @@ void easyEMG::calibrateBaseline(uint16_t samples)
     _baseline = (int16_t)(sum / (int32_t)samples);
 
     // The filters' state refers to the old baseline; start them clean.
-    _nz1 = 0.0f;
-    _nz2 = 0.0f;
+    for (uint8_t i = 0; i < EASYEMG_MAX_NOTCH_SECTIONS; i++) {
+        _notch[i].z1 = 0.0f;
+        _notch[i].z2 = 0.0f;
+    }
     _hz1 = 0.0f;
     _hz2 = 0.0f;
     resetEnvelope();

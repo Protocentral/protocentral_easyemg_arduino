@@ -11,9 +11,9 @@ Arduino library for the **ProtoCentral easyEMG Breakout**: single-channel surfac
 
 ## See it in OpenView
 
-![OpenView showing the easyEMG raw sEMG waveform and its RMS envelope rising during a forearm flex and returning to baseline at rest](assets/easyemg-openview.gif)
+![OpenView showing the easyEMG raw sEMG waveform and its RMS envelope rising during a forearm flex and returning to baseline, with effort as a percentage of maximum contraction rising and falling beside them](assets/easyemg-openview.gif)
 
-Raw sEMG (top) and its RMS envelope (bottom) in [OpenView](https://github.com/Protocentral/protocentral_openview), in µV at the electrodes, during forearm flexes. The `06.OpenView` example streams both; it needs OpenView 3.4 or later and the **easyEMG Breakout** profile.
+Raw sEMG (top) and its RMS envelope (bottom) in [OpenView](https://github.com/Protocentral/protocentral_openview), in µV at the electrodes, with effort as a percentage of your recorded MVC (right), during a forearm flex. The `06.OpenView` example streams both; it needs OpenView 3.4 or later and the **easyEMG Breakout** profile.
 
 ## Links
 
@@ -21,13 +21,6 @@ Raw sEMG (top) and its RMS envelope (bottom) in [OpenView](https://github.com/Pr
 |---|---|
 | Product page | https://protocentral.com/product/easyemg-surface-emg-breakout-qwiic/ |
 | Hardware design files | https://github.com/Protocentral/protocentral_easyemg_hardware |
-| easyISO isolated Qwiic adapter | https://protocentral.com/product/easyiso-isolated-qwiic-adapter/ |
-| easyISO hardware design files | https://github.com/Protocentral/protocentral_easyiso_hardware |
-| MicroPython + Raspberry Pi driver | https://github.com/Protocentral/protocentral-micropython-easyemg |
-| OpenView companion app | https://github.com/Protocentral/protocentral_openview |
-| INA333 datasheet | https://www.ti.com/lit/ds/symlink/ina333.pdf |
-| OPA2333 datasheet | https://www.ti.com/lit/ds/symlink/opa2333.pdf |
-| TLA2024 datasheet | https://www.ti.com/lit/ds/symlink/tla2024.pdf |
 
 ## How it works
 
@@ -134,6 +127,10 @@ A notch also removes real signal. Fix the usual causes first: a REF electrode on
 ## %MVC in 06.OpenView
 
 `06.OpenView` sends %MVC, the smoothed envelope as a percentage of a maximum voluntary contraction (MVC), and records the MVC itself. After reset, or when the host sends `m` (OpenView's **Record MVC** button), it asks you to relax for 2 s, which also measures your resting level, then lights the LED for 5 s: contract as hard as you can until it goes out. It refuses an MVC under 100 µV or under 5× your resting level, because a weak reference makes every later reading several hundred percent, and blinks the LED instead. With `MVC_AUTO_RAISE` on, a stronger contraction later becomes the new MVC, so %MVC stays at or below 100. Byte 6 of each packet reports the step, so OpenView can show when to relax and when to contract.
+
+![OpenView recording an MVC: the MVC tile reads Relax, then Contract hard now while the forearm contracts and the sEMG and envelope rise, then Recorded](assets/easyemg-openview-mvc.gif)
+
+Recording an MVC with **Record MVC**: **Relax…**, then **Contract hard now** for 5 s, then **Recorded**. %MVC then reads against that MVC and falls back as the arm relaxes.
 
 ## Examples
 
